@@ -18,7 +18,7 @@ from typing import List, Tuple, Union
 
 import yaml
 from torch_ecg.cfg import CFG
-
+from multiprocessing import Pool
 from fl_sim.algorithms import builtin_algorithms, get_algorithm, list_algorithms
 from fl_sim.data_processing import FedDataArgs
 from fl_sim.utils.const import NAME
@@ -81,7 +81,7 @@ def parse_config_file(config_file_path: Union[str, Path]) -> Tuple[List[CFG], in
     if configs.get("env", None) is not None:
         for k, v in configs["env"].items():
             os.environ[k] = str(v)
-
+ 
     if "strategy" not in configs or "matrix" not in configs["strategy"]:
         # no matrix specified, run a single experiment
         # replace pattern of the form ${{ xx.xx... }} with corresponding value
@@ -106,13 +106,36 @@ def parse_config_file(config_file_path: Union[str, Path]) -> Tuple[List[CFG], in
         new_config.pop("strategy", None)
         if "strategy" in configs and configs["strategy"].get("n_parallel", 1) != 1:
             warnings.warn("`n_parallel` is not supported for single experiment, " "ignoring `n_parallel`")
+        if "parallel" in configs and configs["parallel"].get("mode", "serial") != "serial":
+            warnings.warn("`parallel` is not supported for single experiment, " "ignoring `parallel`")
         configs = [new_config]
-        n_parallel = 1
-        return configs, n_parallel
+        parallel_config = CFG({"mode": "serial"})
+        return configs, parallel_config
 
-    # number of parallel runs
-    # currently not implemented, but kept for future use
+    # parallel config
+    parallel_config = CFG({"mode": "serial"})
     n_parallel = int(configs["strategy"].get("n_parallel", 1))
+    
+    if "parallel" in configs["strategy"]:
+        parallel_config = CFG(configs["strategy"]["parallel"])
+        if "mode" not in parallel_config:
+            parallel_config["mode"] = "serial"
+        elif parallel_config["mode"] not in ["serial", "parallel_task"]:
+            raise ValueError(f"Invalid parallel mode: {parallel_config['mode']}")
+        
+        if parallel_config["mode"] == "serial" and n_parallel > 1:
+            warnings.warn("`n_parallel` is ignored when parallel mode is 'serial'")
+        elif parallel_config["mode"] == "parallel_task":
+            if "num_workers" in parallel_config:
+                if n_parallel > 1 and parallel_config["num_workers"] != n_parallel:
+                    warnings.warn(f"`n_parallel` ({n_parallel}) is different from `num_workers` ({parallel_config['num_workers']}), using `num_workers`")
+            elif n_parallel > 1:
+                parallel_config["num_workers"] = n_parallel
+            else:
+                parallel_config["num_workers"] = os.cpu_count()
+    elif n_parallel > 1:
+        parallel_config["mode"] = "parallel_task"
+        parallel_config["num_workers"] = n_parallel
 
     # further process configs to a list of configs
     # by replacing values of the pattern ${{ matrix.key }} with the value of key
@@ -155,7 +178,7 @@ def parse_config_file(config_file_path: Union[str, Path]) -> Tuple[List[CFG], in
         new_config.pop("strategy")
         configs.append(new_config)
 
-    return configs, n_parallel
+    return configs, parallel_config
 
 
 def single_run(config: CFG) -> None:
@@ -281,12 +304,41 @@ def single_run(config: CFG) -> None:
     del s, ds, model
 
 
+def run_parallel_task(configs: List[CFG], parallel_config: CFG) -> None:
+    """Run multiple experiments in parallel using Ray, etc.
+
+    Parameters
+    ----------
+    configs : List[CFG]
+        A list of configs of the experiment.
+    parallel_config : CFG
+        The config of the parallel settings.
+
+    Returns
+    -------
+    None
+    """
+    assert parallel_config["mode"] == "parallel_task", "Parallel mode must be parallel_task"
+    assert parallel_config["num_workers"] is not None, "Number of workers must be specified"
+    num_workers = parallel_config["num_workers"]
+    
+    # initialize processes manager
+    
+    # run the experiments in parallel
+    
+    pass
+
+
 def main():
     try:
-        configs, n_parallel = parse_args()
+        configs, parallel_config = parse_args()
         # TODO: run multiple experiments in parallel using Ray, etc.
-        for config in configs:
-            single_run(config)
+        if parallel_config["mode"] == "serial":
+            for config in configs:
+                single_run(config)
+        elif parallel_config["mode"] == "parallel_task":
+            # TODO: run multiple experiments in parallel using Ray, etc.
+            raise NotImplementedError("Parallel mode is not implemented yet.")
     except KeyboardInterrupt:
         print("Cancelled by user.")
     except Exception as e:
